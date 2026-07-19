@@ -1,10 +1,10 @@
-# 3D Attention U-Net for Brain Metastasis Segmentation (BraTS-MET 2025)
+# 3D Attention U-Net for Brain Metastasis Segmentation (BraTS-MET 2026)
 
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.x-EE4C2C?logo=pytorch)
-![MICCAI](https://img.shields.io/badge/MICCAI-BraTS--MET%202025-blue)
+![MICCAI](https://img.shields.io/badge/MICCAI-BraTS--MET%202026-blue)
 ![3D Segmentation](https://img.shields.io/badge/Task-3D%20Medical%20Image%20Segmentation-green)
 
-This project implements a **3D Attention U-Net** for brain tumor (metastasis) segmentation using multi-modal MRI scans, developed for the **BraTS-MET 2025 Challenge** at MICCAI. It segments brain metastases into four tumor sub-regions from four MRI sequences (T1-native, T1-contrast-enhanced, T2-weighted, and T2-FLAIR).
+This project implements a **3D Attention U-Net** for brain tumor (metastasis) segmentation using multi-modal MRI scans, developed for the **BraTS-MET 2026 Challenge** at MICCAI. It segments brain metastases into four tumor sub-regions from four MRI sequences (T1-native, T1-contrast-enhanced, T2-weighted, and T2-FLAIR).
 
 ## Table of Contents
 
@@ -72,7 +72,7 @@ Encoder                           Decoder
 
 ## Dataset
 
-**BraTS-MET 2025 Challenge** — multi-modal brain MRI scans for metastasis segmentation.
+**BraTS-MET 2026 Challenge** — multi-modal brain MRI scans for metastasis segmentation.
 
 ### Input Modalities (4 channels)
 
@@ -137,7 +137,7 @@ pip install nibabel numpy matplotlib
 
 ### 1. Prepare the Dataset
 
-Download the BraTS-MET 2025 training dataset and ensure your data directory follows the structure above.
+Download the BraTS-MET 2026 training dataset and ensure your data directory follows the structure above.
 
 ### 2. Update the Data Path
 
