@@ -1,303 +1,305 @@
-# 3D Attention U-Net for Brain Metastasis Segmentation (BraTS-MET 2026)
+# 3D Attention U-Net for Brain Metastasis Segmentation (BraTS-METS 2026)
 
-![PyTorch](https://img.shields.io/badge/PyTorch-2.x-EE4C2C?logo=pytorch)
-![MICCAI](https://img.shields.io/badge/MICCAI-BraTS--MET%202026-blue)
-![3D Segmentation](https://img.shields.io/badge/Task-3D%20Medical%20Image%20Segmentation-green)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.x-EE4C2C?logo=pytorch)](https://pytorch.org/)
+[![BraTS-METS](https://img.shields.io/badge/Challenge-BraTS--METS%202026-blue)](https://www.synapse.org/Synapse:syn74274097/wiki/639600)
 
-This project implements a **3D Attention U-Net** for brain tumor (metastasis) segmentation using multi-modal MRI scans, developed for the **BraTS-MET 2026 Challenge** at MICCAI. It segments brain metastases into four tumor sub-regions from four MRI sequences (T1-native, T1-contrast-enhanced, T2-weighted, and T2-FLAIR).
+This repository contains a PyTorch training pipeline for five-class brain metastasis segmentation using a 3D Attention U-Net and multi-modal MRI patches. It was developed for the BraTS-METS 2026 setting and follows the `BraTS-MET-*` subject and file naming convention.
 
-## Table of Contents
+- Repository: [Zizyyyyu/BraTS-MET-2026-3D-AttentionUNet](https://github.com/Zizyyyyu/BraTS-MET-2026-3D-AttentionUNet)
+- Challenge: [BraTS 2026 Task 1 data page](https://www.synapse.org/Synapse:syn74274097/wiki/639600)
 
-- [Overview](#overview)
-- [Architecture](#architecture)
-- [Dataset](#dataset)
-- [Requirements](#requirements)
-- [Quick Start](#quick-start)
-- [Configuration](#configuration)
-- [Training](#training)
-- [Checkpoints & Resuming](#checkpoints--resuming)
-- [Outputs](#outputs)
-- [Project Structure](#project-structure)
-- [License](#license)
+## Scope
 
-## Overview
+The current code implements:
 
-The pipeline covers the full 3D medical image segmentation workflow:
+- recursive discovery and loading of labeled NIfTI subjects;
+- four-channel MRI patch construction;
+- class-aware training-patch sampling;
+- a 3D Attention U-Net;
+- combined Generalized Dice and weighted cross-entropy loss;
+- patch-based training and validation;
+- foreground class Dice reporting;
+- checkpointing, training resumption, CSV logging, and curve plotting.
 
-- **Data loading** — reads NIfTI (`.nii.gz`) multi-modal MRI volumes with class-balanced patch sampling
-- **Model** — 3D Attention U-Net with attention-gated skip connections
-- **Loss function** — combined Generalized Dice Loss + weighted Cross-Entropy Loss
-- **Training** — mixed precision (AMP), gradient clipping, learning rate scheduling, atomic checkpointing
-- **Evaluation** — per-class Dice scores for four foreground classes (NETC, SNFH, ET, RC)
-- **Visualization** — loss curves, mean Dice curves, and per-class Dice curves saved as PNG plots
+The repository currently does **not** implement full-volume sliding-window inference, prediction NIfTI export, challenge submission packaging, or the official BraTS-METS lesion-wise evaluation pipeline. The Dice values printed by `train.py` are patch-based, voxel-wise class Dice values used for local training monitoring.
 
-## Architecture
+## Project Structure
 
-The model is a **3D Attention U-Net** (`U3D_UNet.py`) inspired by [Oktay et al., Attention U-Net](https://arxiv.org/abs/1804.03999):
-
-```
-Encoder                           Decoder
-┌─────────┐    ┌─────────────────────────────┐
-│ Conv×2  │ ──→│      Attention Block        │
-│ (4→16)  │    │  ┌───┐   ┌───┐   ┌───────┐ │
-└────┬────┘    │  │ g │ + │ReLU│ → │σ(x)×f│ │
-     │↓        │  └───┘   └───┘   └───────┘ │
-┌─────────┐    └──────────┬──────────────────┘
-│ Conv×2  │    ┌──────────┘
-│ (16→32) │ ──→│   Attention Block
-└────┬────┘    └──────────┐
-     │↓                   │
-┌─────────┐    ┌──────────┘
-│ Conv×2  │ ──→│   Attention Block
-│ (32→64) │    └──────────┐
-└────┬────┘               │
-     │↓                   │
-┌─────────┐    ┌──────────┘
-│ Conv×2  │ ──→│   Attention Block
-│ (64→128)│    └──────────┐
-└────┬────┘               │
-     │↓              ┌────┴────┐
-┌────────────┐       │ Conv×2  │
-│ Conv×2     │       │(128→16) │
-│(128→256)   │ ←──── │ + Conv1 │
-└────────────┘       └─────────┘
-  Bottleneck           Output (5)
+```text
+MICCAI/
+├── train.py          # Training, validation, checkpointing, logging, and plotting
+├── Dataset.py        # NIfTI loading, normalization, and patch selection
+├── U3D_UNet.py       # 3D Attention U-Net
+├── losses.py         # Generalized Dice loss and combined Dice/CE loss
+├── README.md
+├── .gitignore
+├── checkpoints/      # Generated checkpoints; ignored by Git
+└── training_curves/  # Generated plots and CSV history; ignored by Git
 ```
 
-**Encoder path:** 4 levels of double `Conv3d + InstanceNorm3d + ReLU` blocks with `MaxPool3d(2)` downsampling (16 → 32 → 64 → 128 → 256 base channels at bottleneck).
+## Model Architecture
 
-**Decoder path:** 4 levels with `ConvTranspose3d` upsampling and **attention gates** that learn to suppress irrelevant background regions in the skip connections. Each attention gate computes a gating signal from the decoder features to weight the encoder features via sigmoid attention.
+`U3D_UNet.py` defines `AttentionUNet` with four encoder levels, one bottleneck, four attention-gated decoder levels, and a final `1 × 1 × 1` convolution.
 
-**Output:** 1×1×1 convolution mapping 16 channels to 5 output logits (background + 4 foreground classes).
+With the defaults `in_channels=4`, `base_channels=16`, and `num_classes=5`, the channel flow is:
+
+```text
+Input: 4 channels
+
+Encoder 1:     4 → 16
+Encoder 2:    16 → 32
+Encoder 3:    32 → 64
+Encoder 4:    64 → 128
+Bottleneck:  128 → 256
+
+Decoder 4:   256 → 128, with attention-gated Encoder 4 skip
+Decoder 3:   128 → 64,  with attention-gated Encoder 3 skip
+Decoder 2:    64 → 32,  with attention-gated Encoder 2 skip
+Decoder 1:    32 → 16,  with attention-gated Encoder 1 skip
+
+Output:       16 → 5 logits
+```
+
+Each encoder and post-concatenation decoder block contains two repetitions of:
+
+```text
+Conv3d(kernel_size=3, padding=1, bias=False)
+→ InstanceNorm3d
+→ ReLU
+```
+
+Downsampling uses `MaxPool3d(kernel_size=2, stride=2)`. Upsampling uses `ConvTranspose3d(kernel_size=2, stride=2)`.
+
+Each attention block transforms the encoder and decoder features with separate `1 × 1 × 1` convolutions and instance normalization, adds them, applies ReLU, produces a one-channel sigmoid attention map, and multiplies that map with the encoder features before concatenation.
+
+Because the network downsamples four times, patch dimensions should be divisible by 16. The configured `(128, 128, 128)` patch satisfies this requirement.
 
 ## Dataset
 
-**BraTS-MET 2026 Challenge** — multi-modal brain MRI scans for metastasis segmentation.
+### Expected Files
 
-### Input Modalities (4 channels)
+`BraTSDataset` recursively searches `data_dir` for directories whose names begin with `BraTS-MET-`. For a subject named `BraTS-MET-XXXXX-XXX`, labeled training expects:
 
-| Modality | Suffix | Description |
-|----------|--------|-------------|
-| T1-native | `t1n` | T1-weighted without contrast |
-| T1-CE | `t1c` | T1-weighted with contrast enhancement |
-| T2-weighted | `t2w` | T2-weighted |
-| T2-FLAIR | `t2f` | T2 Fluid Attenuated Inversion Recovery |
+```text
+/path/to/data/
+└── BraTS-MET-XXXXX-XXX/
+    ├── BraTS-MET-XXXXX-XXX-t1n.nii.gz
+    ├── BraTS-MET-XXXXX-XXX-t1c.nii.gz
+    ├── BraTS-MET-XXXXX-XXX-t2w.nii.gz
+    ├── BraTS-MET-XXXXX-XXX-t2f.nii.gz
+    └── BraTS-MET-XXXXX-XXX-seg.nii.gz
+```
 
-### Segmentation Labels (5 classes)
+The implementation currently requires all four modality files for every discovered subject.
 
-| Label | Name | Tissue |
-|-------|------|--------|
-| 0 | Background | Non-tumor |
-| 1 | NETC | Necrosis |
-| 2 | SNFH | Peritumoral edema |
+### Input Channels
+
+The four channels are stacked in this fixed order:
+
+| Channel | Suffix | MRI sequence |
+|---:|---|---|
+| 0 | `t1n` | T1-weighted, non-contrast |
+| 1 | `t1c` | T1-weighted, contrast-enhanced |
+| 2 | `t2w` | T2-weighted |
+| 3 | `t2f` | T2-FLAIR |
+
+### Segmentation Labels
+
+The code accepts labels `0` through `4` and maps any value outside this range to background (`0`). The class names used for logging are:
+
+| Label | Logged name | Meaning |
+|---:|---|---|
+| 0 | Background | Non-target voxels |
+| 1 | NETC | Non-enhancing tumor core |
+| 2 | SNFH | Surrounding non-enhancing FLAIR hyperintensity |
 | 3 | ET | Enhancing tumor |
 | 4 | RC | Resection cavity |
 
-### Data Directory Structure
+The model therefore outputs five logits per voxel.
 
-```
-/path/to/brats_data/
-├── BraTS-MET-XXXXX-XXX/
-│   ├── BraTS-MET-XXXXX-XXX-t1n.nii.gz
-│   ├── BraTS-MET-XXXXX-XXX-t1c.nii.gz
-│   ├── BraTS-MET-XXXXX-XXX-t2w.nii.gz
-│   ├── BraTS-MET-XXXXX-XXX-t2f.nii.gz
-│   ├── BraTS-MET-XXXXX-XXX-seg.nii.gz
-│   └── ...
-└── ...
+### Excluded Subjects
+
+`Dataset.py` excludes these subject IDs:
+
+```text
+BraTS-MET-01094-002
+BraTS-MET-01184-002
 ```
 
-### Class-Balanced Patch Sampling
+### Patch Selection
 
-During training, patches of size `(128, 128, 128)` are cropped with **85% probability near a tumor voxel** from a randomly selected foreground class to mitigate severe class imbalance. During validation, cropping is centered on the tumor region. Known corrupted patients (`BraTS-MET-01094-002` and `BraTS-MET-01184-002`) are automatically excluded.
+The default patch size is `(128, 128, 128)`.
+
+During training:
+
+- the foreground classes present in the subject are identified;
+- with probability `0.85`, one present foreground class is selected and a voxel from that class is used as the crop center;
+- otherwise, the crop start is sampled uniformly from the valid spatial range.
+
+During validation:
+
+- if foreground voxels exist, the patch is centered on the midpoint of the foreground bounding box;
+- otherwise, it is centered on the image.
+
+If an image dimension is smaller than the patch dimension, zero-padding is applied at the end of that dimension.
+
+### Normalization
+
+Normalization is performed separately for each modality after patch extraction. Nonzero voxels are standardized using the patch foreground mean and standard deviation. Zero-valued background voxels remain zero.
 
 ## Requirements
 
-- **Python ≥ 3.8**
-- **PyTorch ≥ 2.0** (CUDA recommended)
-- **Nibabel** (NIfTI I/O)
-- **NumPy**
-- **Matplotlib**
+- Python 3.8 or newer
+- PyTorch
+- NumPy
+- NiBabel
+- Matplotlib
 
-### Installation
+The repository does not currently include a `requirements.txt` or environment file.
+
+## Installation
 
 ```bash
-# Clone the repository
-git clone <your-repo-url>
-cd MICCAI
+git clone https://github.com/Zizyyyyu/BraTS-MET-2026-3D-AttentionUNet.git
+cd BraTS-MET-2026-3D-AttentionUNet
 
-# Install dependencies
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-pip install nibabel numpy matplotlib
+pip install torch numpy nibabel matplotlib
 ```
 
-> **Note:** The project does not include a `requirements.txt` yet — install the packages listed above manually. CUDA version should match your system's driver (adjust the PyTorch install command accordingly).
+Install a CUDA-enabled PyTorch build appropriate for the local GPU driver when GPU training is required.
 
-## Quick Start
+## Training
 
-### 1. Prepare the Dataset
+### 1. Configure the Dataset Path
 
-Download the BraTS-MET 2026 training dataset and ensure your data directory follows the structure above.
-
-### 2. Update the Data Path
-
-Edit the `data_dir` variable in `train.py` (line 229) to point to your dataset:
+In `train.py`, update:
 
 ```python
-data_dir = "/path/to/your/brats_data"
+data_dir = "/root/autodl-tmp/brats_raw/training_extracted/MICCAI-LH-BraTS2025-MET-Challenge-Training"
 ```
 
-### 3. Run Training
+### 2. Start Training
+
+Run the command from the repository root so that relative output paths point to the intended directories:
 
 ```bash
 python train.py
 ```
 
-Training automatically creates `./checkpoints/` and `./training_curves/` directories.
+### Default Configuration
 
-## Configuration
+The current defaults are defined directly inside `train.py:main()`:
 
-All hyperparameters are defined as constants inside `train.py:main()`. Below are the key settings:
+| Setting | Default |
+|---|---:|
+| Patch size | `(128, 128, 128)` |
+| Validation ratio | `0.2` |
+| Batch size | `8` |
+| DataLoader workers | `14` |
+| Prefetch factor | `1` |
+| Input channels | `4` |
+| Output classes | `5` |
+| Base channels | `16` |
+| Epochs | `75` |
+| Learning rate | `1e-4` |
+| Weight decay | `1e-5` |
+| Random seed | `2026` |
+| Class-aware crop probability | `0.85` |
+| Resume training | `True` |
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `patch_size` | `(128, 128, 128)` | 3D patch dimensions for training |
-| `validation_ratio` | `0.2` | Fraction of patients held out for validation |
-| `batch_size` | `8` | Mini-batch size |
-| `num_workers` | `14` | DataLoader worker processes |
-| `prefetch_factor` | `1` | Samples prefetched per worker |
-| `in_channels` | `4` | Input MRI modalities |
-| `num_classes` | `5` | Segmentation classes (1 background + 4 foreground) |
-| `base_channels` | `16` | Initial feature channels (doubled at each encoder level) |
-| `num_epochs` | `75` | Total training epochs |
-| `learning_rate` | `1e-4` | Initial learning rate (AdamW) |
-| `weight_decay` | `1e-5` | AdamW weight decay |
-| `seed` | `2026` | Random seed for reproducibility |
-| `class_crop_probability` | `0.85` | Probability of class-aware patch cropping |
+Subjects are shuffled with a NumPy generator seeded with `2026`. The validation size is `max(1, int(dataset_size * 0.2))`; all remaining subjects are used for training. When resuming, the saved training and validation indices are reused.
 
-Modify these directly in `train.py` or refactor them into a config file as needed.
+## Optimization
 
-## Training
+### Loss
 
-The training pipeline includes the following features:
+`DiceCELoss` adds two equally weighted terms:
 
-### Reproducibility
-- Seeds are set for `random`, `numpy`, `torch`, and CUDA operations.
-- A custom `seed_worker` ensures DataLoader workers produce deterministic orders.
-- Full random states are saved with each checkpoint for exact resumption.
-
-### Mixed Precision (AMP)
-- Automatic Mixed Precision via `torch.cuda.amp` (`GradScaler` + `autocast`) is enabled when CUDA is available, speeding up training and reducing memory usage.
-
-### Optimization
-- **Optimizer:** AdamW (`lr=1e-4`, `weight_decay=1e-5`)
-- **Scheduler:** `ReduceLROnPlateau` — halves the learning rate (`factor=0.5`) when validation mean Dice plateaus (`patience=4`)
-- **Gradient clipping:** Max norm of 1.0
-
-### Loss Function
-
-The combined loss (`DiceCELoss`) consists of:
-
-1. **Generalized Dice Loss** (weight `1.0`) — multi-class Dice loss with inverse-squared-frequency weighting per class; excludes background (class 0) and only considers valid foreground classes present in the batch.
-
-2. **Weighted Cross-Entropy Loss** (weight `1.0`) with class weights:
-   - Background: `0.1` (heavily down-weighted)
-   - All foreground classes: `1.0`
-
-### Logging
-
-Every 10 training steps, the current running loss and mean Dice are printed. At the end of each epoch, full per-class metrics for both training and validation are reported:
-
-```
-Epoch [1/75]
-Learning rate: 0.00010000
-Train Loss: 0.3521    Train Mean Dice: 0.8245
-Train NETC Dice: 0.7102    Train SNFH Dice: 0.8543
-Train ET Dice: 0.8910      Train RC Dice: 0.8425
-Validation Loss: 0.4023    Validation Mean Dice: 0.8012
-Validation NETC Dice: 0.6801  Validation SNFH Dice: 0.8310
-Validation ET Dice: 0.8723    Validation RC Dice: 0.8214
-Epoch time: 12.34 minutes
+```text
+loss = 1.0 × GeneralizedDiceLoss + 1.0 × WeightedCrossEntropyLoss
 ```
 
-## Checkpoints & Resuming
+The Generalized Dice component:
 
-### Checkpoint Files
+- applies softmax to the logits;
+- excludes background;
+- ignores foreground classes absent from the current batch targets;
+- uses inverse-squared target-volume class weights.
 
-All checkpoints are saved to `./checkpoints/`:
+Cross-entropy uses these class weights:
 
-| File | Content | Usage |
-|------|---------|-------|
-| `last_training_checkpoint.pth` | Full training state | Resume training from last epoch |
-| `best_attention_unet_3d.pth` | Model with best val Dice | Inference / evaluation |
-| `final_attention_unet_3d.pth` | Model after all epochs | Final export |
-
-### What's Saved in a Full Checkpoint
-
-- Model, optimizer, scheduler, and scaler states
-- Best validation Dice score
-- Complete training history (all metrics per epoch)
-- Training/validation split indices and patient IDs
-- DataLoader generator state
-- Python, NumPy, and PyTorch/CUDA random states
-
-### Resume Training
-
-By default, `resume_training = True`. If `last_training_checkpoint.pth` exists, training automatically resumes from the saved epoch. The script validates dataset consistency (patient ID list must match) before resuming. If the dataset has changed, delete or move the checkpoint and set `resume_training = False`.
-
-### Atomic Saves
-
-All checkpoints are written to a `.tmp` file first, then atomically renamed via `.replace()`, preventing corruption from interrupted writes.
-
-## Outputs
-
-### Training Curves
-
-After each epoch, updated plots are saved to `./training_curves/`:
-
-| File | Content |
-|------|---------|
-| `loss_curve.png` | Training and validation loss over epochs |
-| `mean_dice_curve.png` | Training and validation mean Dice score |
-| `train_class_dice_curve.png` | Per-class Dice for each training class |
-| `validation_class_dice_curve.png` | Per-class Dice for validation |
-| `training_history.csv` | Full tabular history of all metrics |
-
-### Plot Example
-
-The loss and Dice curves are saved at 200 DPI and include:
-- Grid lines for readability
-- Markers at each epoch
-- Dice plots scaled `[0.0, 1.0]` with legend
-- Tight layout for clean margins
-
-## Project Structure
-
-```
-MICCAI/
-├── train.py                 # Main training script — orchestrates entire pipeline
-├── Dataset.py               # BraTSDataset — NIfTI data loader with patch sampling
-├── U3D_UNet.py              # AttentionUNet — 3D model architecture with attention gates
-├── losses.py                # GeneralizedDiceLoss & DiceCELoss functions
-├── checkpoints/             # Saved model weights and training checkpoints
-│   ├── last_training_checkpoint.pth
-│   ├── best_attention_unet_3d.pth
-│   └── final_attention_unet_3d.pth
-├── training_curves/         # Loss/Dice PNG plots and CSV history
-│   ├── loss_curve.png
-│   ├── mean_dice_curve.png
-│   ├── train_class_dice_curve.png
-│   ├── validation_class_dice_curve.png
-│   └── training_history.csv
-└── README.md                # This file
+```text
+[0.1, 1.0, 1.0, 1.0, 1.0]
 ```
 
-## Notes
+### Optimizer and Scheduler
 
-- The data directory path is currently hard-coded to `/root/autodl-tmp/brats_raw/training_extracted/MICCAI-LH-BraTS2025-MET-Challenge-Training` (an AutoDL cloud GPU path). Update it for your environment.
-- Two known corrupted patients are excluded automatically. If other corrupted scans are encountered, add them to the `excluded_patient_ids` set in `Dataset.py`.
-- The model targets 5 output channels (1 background + 4 foreground). For inference, apply `argmax` along the channel dimension to obtain per-voxel class predictions.
+- Optimizer: `AdamW(lr=1e-4, weight_decay=1e-5)`
+- Scheduler: `ReduceLROnPlateau(mode="max", factor=0.5, patience=4)`
+- Scheduler target: validation mean Dice
+- Gradient clipping: maximum norm `1.0`
+
+### Mixed Precision
+
+CUDA is used when available. Automatic mixed precision with `torch.cuda.amp.autocast` and `GradScaler` is enabled only on CUDA. DataLoader pinned memory is also enabled only when CUDA is used.
+
+## Local Dice Metrics
+
+After applying `argmax` to the five output logits, `train.py` accumulates voxel intersections and denominators for labels `1` through `4` over all patches in an epoch. For each class:
+
+```text
+Dice = (2 × intersection + 1e-5) / (prediction voxels + target voxels + 1e-5)
+```
+
+The reported mean Dice is the mean over foreground classes whose accumulated denominator is greater than zero. These metrics are reported for both training and validation.
+
+Every 10 training batches, the script prints the running loss and mean Dice. At the end of each epoch, it prints loss, mean Dice, and the four class Dice values.
+
+These are not the official BraTS-METS lesion-wise ranking metrics. For challenge-compatible evaluation, use full-volume NIfTI predictions and the separate [official BraTS evaluation package](https://github.com/BraTS/BraTS_evaluation).
+
+## Checkpoints and Resuming
+
+The following files are generated in `./checkpoints/`:
+
+| File | Contents |
+|---|---|
+| `last_training_checkpoint.pth` | Model, optimizer, scheduler, scaler, history, split indices, subject IDs, and saved random states |
+| `best_attention_unet_3d.pth` | Model state and metadata from the highest local validation mean Dice |
+| `final_attention_unet_3d.pth` | Model state and architecture metadata after the final configured epoch |
+
+Checkpoint writes use a temporary file followed by `Path.replace()`.
+
+With `resume_training=True`, the script loads `last_training_checkpoint.pth` when it exists. It verifies the saved ordered subject-ID list, restores the saved split, and resumes at the next epoch. If the ordered subject list differs, training stops with an error.
+
+The checkpoint stores Python, NumPy, PyTorch, CUDA, and DataLoader-generator states. This improves continuity across restarts, but the code does not promise bit-for-bit deterministic resumption: cuDNN benchmarking is enabled on CUDA, deterministic algorithms are not forced, and persistent DataLoader worker RNG states are not checkpointed.
+
+## Training Outputs
+
+After each completed epoch, the script updates:
+
+```text
+training_curves/
+├── loss_curve.png
+├── mean_dice_curve.png
+├── train_class_dice_curve.png
+├── validation_class_dice_curve.png
+└── training_history.csv
+```
+
+The PNG files are saved at 200 DPI. The CSV includes epoch number, learning rate, training and validation losses, mean Dice values, four class Dice values for each split, and epoch duration in minutes.
+
+The `checkpoints/` and `training_curves/` directories are ignored by Git because their contents are generated during training.
+
+## Current Limitations
+
+- The dataset path and training settings are hard-coded inside `train.py`.
+- Every accepted subject must contain all four modality files.
+- Training and validation operate on one patch per subject access rather than on full reconstructed volumes.
+- There is no data augmentation beyond random/class-aware cropping.
+- There is no inference or NIfTI prediction export script.
+- There is no challenge submission or containerization pipeline.
+- Local model selection uses patch-based foreground class Dice rather than official lesion-wise BraTS-METS metrics.
 
 ## License
 
-This project is developed for the BraTS-MET 2026 Challenge at MICCAI. All rights reserved.
+This repository currently does not include a license file.
